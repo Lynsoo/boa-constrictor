@@ -45,7 +45,7 @@ if IS_CUDA:
         batch = gr.gpu.queue.RangeCoderBatch(N, vocab_size, maxL)
 
         # Streaming state
-        inf = model.init_stream(max_len=maxL, batch_size=N, device=device, dtype=torch.float32)
+        inf = model.init_stream(batch_size=N, device=device)
         prev = X[:, 0].clone()  # [N] device
 
         total_steps = sum(L - 1 for L in Ls)
@@ -111,7 +111,7 @@ if IS_CUDA:
             outs_gpu[:, 0] = torch.as_tensor(first_bytes, device=device, dtype=torch.uint8)
 
             # Streaming state
-            inf = model.init_stream(max_len=maxL, batch_size=N, device=device, dtype=torch.float32)
+            inf = model.init_stream(batch_size=N, device=device)
             prev = torch.as_tensor(first_bytes, dtype=torch.long, device=device)
 
             total_steps = sum(L - 1 for L in full_lens)
@@ -185,7 +185,7 @@ def compress_CPU(
     encs = [constriction.stream.queue.RangeEncoder() for _ in range(N)]
 
     # Streaming state (CPU cache structure)
-    caches = model.init_stream(max_len=maxL, batch_size=N, device=device, dtype=torch.float32)
+    caches = model.init_stream(batch_size=N, device=device)
     prev = X[:, 0].clone()  # [N] CPU
 
     total_steps = sum(L - 1 for L in Ls)
@@ -272,7 +272,7 @@ def decompress_CPU(
             outs[i][0] = int(first_bytes[i])
 
         # Streaming state (CPU caches)
-        caches = model.init_stream(max_len=maxL, batch_size=N, device=device, dtype=torch.float32)
+        caches = model.init_stream(batch_size=N, device=device)
         prev = torch.tensor(first_bytes, dtype=torch.long, device=device)
 
         total_steps = sum(L - 1 for L in full_lens)
