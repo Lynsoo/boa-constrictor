@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from model import BoaConstrictor, ByteDataloader, make_splits
+from model import BoaConstrictor_MinGRU, ByteDataloader, make_splits
 from boa import BOA
 from train import train
 
@@ -244,7 +244,7 @@ def main():
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     # Setup model, dataloaders, optimizer, loss
-    model = BoaConstrictor(d_model=d_model, num_layers=num_layers, vocab_size=vocab_size, device=device)
+    model = BoaConstrictor_MinGRU(d_model=d_model, num_layers=num_layers, vocab_size=vocab_size, device=device)
 
     dataloader = ByteDataloader(data_bytes, seq_len=seq_len, batch_size=batch_size, device=device)
 
