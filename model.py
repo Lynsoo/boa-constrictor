@@ -2,139 +2,87 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-def BoaConstrictor(d_model=256, num_layers=4, vocab_size=256, device="cuda"):
-    """ Construct a BoaBytePredictor with smaller model size for Boa experiments. """
+def BoaConstrictor_MinGRU(d_model=256, num_layers=2, vocab_size=256, device="cuda"):
+    """Construct a MinGRU-based backbone compatible with BOA."""
     IS_CUDA = torch.cuda.is_available() and device == "cuda"
+    device = "cuda" if IS_CUDA else "cpu"
 
-    if IS_CUDA:
-        device = "cuda"
-        from mamba_ssm import Mamba
-        from mamba_ssm.utils.generation import InferenceParams
-    else:
-        device = "cpu"
-        from mambapy.mamba import MambaBlock as MambaCPU, MambaConfig
-
-    def tag_mamba_layers_with_ids(model):
-        """Give each Mamba layer a unique .layer_idx (0..N-1) for streaming cache."""
-        i = 0
-        for m in model.modules():
-            if IS_CUDA:
-                if isinstance(m, Mamba):
-                    setattr(m, "layer_idx", i)
-                    i += 1
-            else:
-                if isinstance(m, MambaCPU):
-                    setattr(m, "layer_idx", i)
-                    i += 1
-
-    def bump_offset(inf, k: int = 1):
-        # Most builds use seqlen_offset
-        if hasattr(inf, "seqlen_offset"):
-            inf.seqlen_offset += k
-        elif hasattr(inf, "sequence_length_offset"):
-            setattr(inf, "sequence_length_offset", getattr(inf, "sequence_length_offset") + k)
-        else:
-            # set a best-effort attribute for obscure builds
-            setattr(inf, "seqlen_offset", getattr(inf, "seqlen_offset", 0) + k)
-
-
-    # ---------- Model blocks that pass inference_params ----------
-    class MambaBlock(nn.Module):
+    class MinGRUBlock(nn.Module):
+        """Single GRU block with feedforward and layernorm."""
         def __init__(self, d_model: int):
             super().__init__()
             self.ln1 = nn.LayerNorm(d_model)
-            if IS_CUDA:
-                self.mamba = Mamba(d_model=d_model)
-            else:
-                config = MambaConfig(d_model=d_model, n_layers=0, use_cuda=False)
-                self.mamba = MambaCPU(config)
+            self.gru = nn.GRU(d_model, d_model, batch_first=True)
             self.ln2 = nn.LayerNorm(d_model)
             self.ff = nn.Sequential(
-                nn.Linear(d_model, 4 * d_model),
+                nn.Linear(d_model, 4*d_model),
                 nn.GELU(),
-                nn.Linear(4 * d_model, d_model),
+                nn.Linear(4*d_model, d_model)
             )
-        def forward(self, x, inference_params=None):
+        def forward(self, x, hidden=None):
             y = self.ln1(x)
-            if IS_CUDA:
-                y = self.mamba(y, inference_params=inference_params)  # <-- stream cache
-            else:
-                y = self.mamba(y)  # no stream cache in CPU version
+            y, hidden = self.gru(y, hidden)
             y = self.ln2(y)
             y = self.ff(y)
-            return x + y
-        
-        if not IS_CUDA:
-            def init_cache(self, batch_size: int, device):
-                # cache for mambapy.MambaBlock.step: (h, inputs)
-                d_inner = self.mamba.config.d_inner
-                d_conv = self.mamba.config.d_conv
-                inputs = torch.zeros(batch_size, d_inner, d_conv - 1, device=device)
-                return (None, inputs)
+            return x + y, hidden
 
-            def step(self, x, cache):
-                # x: [B, D] -> [B, D], cache passthrough
-                y = self.ln1(x)
-                y, cache = self.mamba.step(y, cache)  # mambapy step
-                y = self.ln2(y)
-                y = self.ff(y)
-                return x + y, cache
-        
-    class BoaBytePredictor(nn.Module):
-        """ Mamba model adapted to predict the next byte in a sequence. """
-        def __init__(self, d_model=256, num_layers=4, vocab_size=256):
+        def init_cache(self, batch_size: int, device):
+            # GRU hidden state initialization for streaming
+            return torch.zeros(1, batch_size, self.gru.hidden_size, device=device)
+
+        def step(self, x, hidden):
+            y = self.ln1(x.unsqueeze(1))  
+            y, hidden = self.gru(y, hidden)
+            y = self.ln2(y)
+            y = self.ff(y)
+            return x + y.squeeze(1), hidden 
+
+    class MinGRUBytePredictor(nn.Module):
+        """Predict next byte using stacked MinGRU blocks."""
+        def __init__(self, d_model=256, num_layers=2, vocab_size=256):
             super().__init__()
-            # Embedding for vocab_size possible bytes
             self.embedding = nn.Embedding(vocab_size, d_model)
-            self.blocks = nn.ModuleList([MambaBlock(d_model) for _ in range(num_layers)])
+            self.blocks = nn.ModuleList([MinGRUBlock(d_model) for _ in range(num_layers)])
             self.head = nn.Sequential(
                 nn.Linear(d_model, d_model),
                 nn.ReLU(),
-                # Output logits for each of the vocab_size possible next bytes
                 nn.Linear(d_model, vocab_size)
             )
 
-        def forward(self, x, inference_params=None):
-            h = self.embedding(x)  # [B, L, D]
-            for blk in self.blocks:
-                h = blk(h, inference_params=inference_params)
-            return self.head(h)  # [B, L, 256]
-        
-        if IS_CUDA:
-            @torch.inference_mode()
-            def init_stream(self, max_len: int, batch_size: int = 1, device=None, dtype=None):
-                return InferenceParams(max_batch_size=batch_size, max_seqlen=max_len)
+        def forward(self, x, hidden_states=None):
+            h = self.embedding(x) 
+            new_hidden = []
+            if hidden_states is None:
+                hidden_states = [None] * len(self.blocks)
 
-            @torch.inference_mode()
-            def step(self, byte_t: torch.LongTensor, inf) -> torch.Tensor:
-                # byte_t: [B]
-                x = self.embedding(byte_t).unsqueeze(1)  # [B, 1, D]
-                h = x
-                for blk in self.blocks:
-                    h = blk(h, inference_params=inf)      # O(1) per token (cached)
-                logits_next = self.head(h).squeeze(1)     # [B, vocab_size]
-                bump_offset(inf, 1)                       # advance stream
-                return logits_next
-        else:
-            @torch.inference_mode()
-            def init_stream(self, max_len: int, batch_size: int = 1, device=None, dtype=None):
-                # returns list of per-block caches
-                return [blk.init_cache(batch_size, device) for blk in self.blocks]
+            for blk, hidden in zip(self.blocks, hidden_states):
+                h, new_h = blk(h, hidden)
+                new_hidden.append(new_h)
+            return self.head(h), new_hidden
 
-            @torch.inference_mode()
-            def step(self, byte_t: torch.LongTensor, caches) -> torch.Tensor:
-                # byte_t: [B] -> logits: [B, 256]
-                h = self.embedding(byte_t)  # [B, D]
-                for i, blk in enumerate(self.blocks):
-                    h, caches[i] = blk.step(h, caches[i])  # O(1) per token with cache
-                logits_next = self.head(h)  # [B, vocab_size]
-                return logits_next
-    model = BoaBytePredictor(d_model=d_model, num_layers=num_layers, vocab_size=vocab_size)
-    tag_mamba_layers_with_ids(model)
+        # Streaming / step-by-step inference
+        @torch.inference_mode()
+        def init_stream(self, batch_size=1, device=None):
+            device = device or next(self.parameters()).device
+            return [blk.init_cache(batch_size, device) for blk in self.blocks]
+
+        @torch.inference_mode()
+        def step(self, byte_t: torch.LongTensor, hidden_states):
+            # byte_t: [B]
+            x = self.embedding(byte_t)  # [B, D]
+            new_hidden = []
+            h = x
+            for blk, hidden in zip(self.blocks, hidden_states):
+                h, new_h = blk.step(h, hidden)
+                new_hidden.append(new_h)
+            logits_next = self.head(h)  # [B, vocab_size]
+            return logits_next, new_hidden
+
+    # Instantiate model
+    model = MinGRUBytePredictor(d_model=d_model, num_layers=num_layers, vocab_size=vocab_size)
     return model
 
 def _aligned_len(n_bytes: int, seq_len: int, batch_size: int) -> int:
-    # number of usable bytes that fit whole (batch_size * seq_len) chunks
     block = seq_len * batch_size
     return (n_bytes // block) * block
 
