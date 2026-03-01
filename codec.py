@@ -60,7 +60,7 @@ if IS_CUDA:
                 break
 
             # Compute probabilities on GPU for current prev
-            logits = model.step(prev, inf)
+            logits,_ = model.step(prev, inf)
             if logits.ndim == 3:
                 logits = logits.squeeze(1)
             probs_gpu = torch.softmax(logits, dim=-1).to(torch.float32)
@@ -128,7 +128,7 @@ if IS_CUDA:
                     break
 
                 # Compute probabilities on GPU for current prev
-                logits = model.step(prev, inf)
+                logits,_ = model.step(prev, inf)
                 if logits.ndim == 3:
                     logits = logits.squeeze(1)
                 probs_gpu = torch.softmax(logits, dim=-1).to(torch.float32)
@@ -207,7 +207,7 @@ def compress_CPU(
             break
 
         # Compute probabilities on CPU for current prev
-        logits = model.step(prev, caches)
+        logits,_ = model.step(prev, caches)
         if logits.ndim == 3:
             logits = logits.squeeze(1)
         probs = torch.softmax(logits, dim=-1).to(torch.float32)
@@ -294,7 +294,7 @@ def decompress_CPU(
             if not active.any():
                 break
 
-            logits = model.step(prev, caches)
+            logits,_ = model.step(prev, caches)
             if logits.ndim == 3:
                 logits = logits.squeeze(1)
             probs = torch.softmax(logits, dim=-1).to(torch.float32)
