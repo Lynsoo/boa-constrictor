@@ -68,15 +68,14 @@ def BoaConstrictor_MinGRU(d_model=256, num_layers=2, vocab_size=256, device="cud
 
         @torch.inference_mode()
         def step(self, byte_t: torch.LongTensor, hidden_states):
-            # byte_t: [B]
-            x = self.embedding(byte_t)  # [B, D]
+            x = self.embedding(byte_t) 
             new_hidden = []
             h = x
             for blk, hidden in zip(self.blocks, hidden_states):
                 h, new_h = blk.step(h, hidden)
                 new_hidden.append(new_h)
-            logits_next = self.head(h)  # [B, vocab_size]
-            return logits_next, new_hidden
+            logits_next = self.head(h) 
+            return logits_next  
 
     # Instantiate model
     model = MinGRUBytePredictor(d_model=d_model, num_layers=num_layers, vocab_size=vocab_size)
